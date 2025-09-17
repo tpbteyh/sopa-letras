@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sopa de Letras</title>
+<style>
+  :root{
+    --accent:#2563eb;
+    --found:#a7f3d0;
+    --select:#bfdbfe;
+    /* Estas variables se recalculan por JS para que todo entre sin zoom */
+    --grid-gap: 6px;
+    --cell-size: 40px;
+    --cell-font: 18px;
+    --cell-border: 2px;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial;
+    background:#f8fafc; color:#0f172a; line-height:1.35;
+    display:flex; min-height:100dvh; flex-direction:column;
+  }
+  header{
+    padding:14px 16px; background:white; box-shadow:0 2px 10px rgba(15,23,42,.05);
+    position:sticky; top:0; z-index:5;
+  }
+  h1{margin:0; font-size:clamp(18px,5.2vw,24px)}
+  main{padding:14px; display:grid; gap:16px; max-width:900px; width:100%; margin:0 auto}
+  .card{
+    background:white; border-radius:16px; box-shadow:0 8px 30px rgba(15,23,42,.06); padding:12px;
+  }
+  /* El grid ocupa todo el ancho; JS ajusta tamaño de celdas según ancho y alto */
+  .grid{
+    width:100%;
+    display:grid;
+    grid-template-columns: repeat(14, var(--cell-size));
+    justify-content:center;
+    gap: var(--grid-gap);
+    touch-action:none; /* mejora el drag en móvil */
+    user-select:none;
+  }
+  .cell{
+    width:var(--cell-size);
+    aspect-ratio:1;
+    display:grid; place-items:center;
+    font-weight:700; font-size: var(--cell-font);
+    border:var(--cell-border) solid #cbd5e1; border-radius:10px; background:#fff;
+    transition:transform .05s ease, background .15s ease, border-color .15s ease;
+  }
+  .cell:active{ transform:scale(.98) }
+  .cell.selecting{ background: var(--select); border-color:#93c5fd }
+  .cell.found{ background: var(--found); border-color:#34d399 }
+
+  .legend h2{font-size:18px; margin:0 0 8px}
+  .words{display:grid; grid-template-columns:1fr 1fr; gap:6px 16px; font-size:16px}
+  .word{display:flex; align-items:center; gap:8px}
+  .word.done{ color:#065f46; text-decoration: line-through; }
+  .badge{display:inline-grid; place-items:center; width:22px; height:22px; border-radius:999px; background:#e2e8f0; font-size:12px; font-weight:700;}
+  .word.done .badge{ background:#34d399; color:white }
+
+  .hint{font-size:13px; color:#475569; margin-top:8px}
+  .toolbar{display:flex; gap:8px; flex-wrap:wrap; margin:6px 0 10px}
+  button{
+    padding:10px 14px; border-radius:12px; border:1px solid #cbd5e1;
+    background:#f1f5f9; font-weight:700; cursor:pointer;
+  }
+  button.primary{ background:#2563eb; color:white; border-color:#2563eb }
+
+  .footer{font-size:12px; color:#64748b; text-align:center; padding:16px}
+
+  /* Modal final */
+  .modal{
+    position:fixed; inset:0; background:rgba(2,6,23,.56);
+    display:none; align-items:center; justify-content:center; z-index:10;
+  }
+  .modal.show{ display:flex }
+  .modal .box{
+    background:white; padding:20px; border-radius:18px; max-width:520px; width:92%;
+    text-align:center; box-shadow:0 20px 60px rgba(2,6,23,.33);
+  }
+</style>
+</head>
+<body>
+<header><h1>🧩 Sopa de Letras</h1></header>
+
+<main>
+  <section class="card">
+    <div class="toolbar">
+      <button class="primary" id="btnReiniciar">🔁 Reiniciar juego</button>
+    </div>
+
+    <div id="grid" class="grid" aria-label="Sopa de letras"></div>
+    <p class="hint">Tocá y arrastrá para seleccionar.</p>
+  </section>
+
+  <section class="card legend">
+    <h2>Palabras a buscar</h2>
+    <div id="lista" class="words"></div>
+  </section>
+</main>
+
+<div class="footer"></div>
+
+<!-- Modal final -->
+<div class="modal" id="modalFin" role="dialog" aria-modal="true">
+  <div class="box">
+    <h2>¡Completado! 🎉</h2>
+    <p>¡Gracias por participar! Encontraste todas las palabras.</p>
+    <button id="btnCerrarModal" class="primary">Aceptar</button>
+  </div>
+</div>
+
+<script>
+/* ===== Config ===== */
+const N = 14;
+const palabrasOriginales = [
+  "Hermenéutica", "Comprensión", "Subjetividad",
+  "Ciencia", "Espíritu", "Experiencia", "Vivida"
+];
+// Direcciones permitidas (sin palabras al revés)
+const DIRECCIONES = { H:{dx:1,dy:0}, V:{dx:0,dy:1}, D:{dx:1,dy:1} };
+// Mezcla mínima
+const MIN_REQ = {H:3, V:2, D:1};
+
+/* ===== Utiles ===== */
+const sinTildes = s => s.normalize('NFD').replace(/\p{Diacritic}/gu,'');
+const toGridWord = s => sinTildes(s).replace(/\s+/g,'').toUpperCase();
+const palabras = palabrasOriginales.map(toGridWord);
+const rngChoice = arr => arr[Math.floor(Math.random()*arr.length)];
+const dentro = (x,y)=> x>=0 && y>=0 && x<N && y<N;
+
+/* ===== DOM ===== */
+const $grid = document.getElementById('grid');
+const $lista = document.getElementById('lista');
+const $btnReiniciar = document.getElementById('btnReiniciar');
+const $modalFin = document.getElementById('modalFin');
+const $btnCerrarModal = document.getElementById('btnCerrarModal');
+
+/* ===== Estado ===== */
+let state = { grid:null, placements:null, found:new Set(), selecting:false, path:[], startCell:null };
+
+/* ===== Generación de sopa ===== */
+function generarSopa() {
+  let dTags = [];
+  dTags.push(...Array(MIN_REQ.H).fill('H'));
+  dTags.push(...Array(MIN_REQ.V).fill('V'));
+  dTags.push(...Array(MIN_REQ.D).fill('D'));
+  while (dTags.length < palabras.length) dTags.push(rngChoice(['H','V']));
+
+  const orden = palabras.map((w,i)=>({w,i,len:w.length})).sort((a,b)=> b.len-a.len);
+
+  for (let intento=0; intento<250; intento++){
+    const grid = Array.from({length:N}, ()=> Array(N).fill(''));
+    const placements = [];
+    const asignadas = [...dTags].sort(()=>Math.random()-0.5);
+    let ok = true;
+
+    for (let k=0; k<orden.length; k++){
+      const {w,i:idx} = orden[k];
+      const tag = asignadas[k];
+      const {dx,dy} = DIRECCIONES[tag];
+
+      const coords = [];
+      for (let y=0;y<N;y++) for (let x=0;x<N;x++) coords.push([x,y]);
+      coords.sort(()=>Math.random()-0.5);
+
+      let puesta=false;
+      for (const [x0,y0] of coords){
+        const x1=x0+dx*(w.length-1), y1=y0+dy*(w.length-1);
+        if (!dentro(x1,y1)) continue;
+
+        let okWord=true;
+        for (let i2=0;i2<w.length;i2++){
+          const x=x0+dx*i2, y=y0+dy*i2, c=grid[y][x];
+          if (c && c!==w[i2]) { okWord=false; break; }
+        }
+        if (!okWord) continue;
+
+        for (let i2=0;i2<w.length;i2++){
+          const x=x0+dx*i2, y=y0+dy*i2;
+          grid[y][x]=w[i2];
+        }
+        placements.push({word:w,x:x0,y:y0,dx,dy,idx});
+        puesta=true; break;
+      }
+      if (!puesta){ ok=false; break; }
+    }
+    if (!ok) continue;
+
+    const ABC="ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    for (let y=0;y<N;y++) for (let x=0;x<N;x++)
+      if (!grid[y][x]) grid[y][x] = ABC[Math.floor(Math.random()*ABC.length)];
+
+    return {grid, placements};
+  }
+  throw new Error("No se pudo generar la sopa con las restricciones.");
+}
+
+/* ===== Render ===== */
+function dibujarLista(){
+  $lista.innerHTML='';
+  palabrasOriginales.forEach((p, i)=>{
+    const div=document.createElement('div'); div.className='word'+(state.found.has(i)?' done':'');
+    const b=document.createElement('span'); b.className='badge'; b.textContent=state.found.has(i)?'✓':(i+1);
+    const t=document.createElement('span'); t.textContent=p;
+    div.append(b,t); $lista.append(div);
+  });
+}
+function renderGrid(){
+  $grid.innerHTML='';
+  for (let y=0;y<N;y++){
+    for (let x=0;x<N;x++){
+      const cell=document.createElement('div');
+      cell.className='cell';
+      cell.textContent=state.grid[y][x];
+      cell.setAttribute('role','button');
+      cell.setAttribute('aria-label', `Fila ${y+1}, Columna ${x+1}, letra ${state.grid[y][x]}`);
+      cell.dataset.x=x; cell.dataset.y=y;
+      $grid.append(cell);
+    }
+  }
+  paintFound();
+}
+function paintFound(){
+  $grid.querySelectorAll('.cell').forEach(c=>c.classList.remove('found'));
+  state.placements.forEach(p=>{
+    if (state.found.has(p.idx)){
+      for (let i=0;i<p.word.length;i++){
+        const x=p.x+p.dx*i, y=p.y+p.dy*i;
+        const el=$grid.querySelector(`.cell[data-x="${x}"][data-y="${y}"]`);
+        if (el) el.classList.add('found');
+      }
+    }
+  });
+}
+
+/* ===== Selección táctil/ratón ===== */
+function cellFromEvent(e){
+  const touch = e.touches?.[0] ?? e.changedTouches?.[0];
+  const target = (touch ? document.elementFromPoint(touch.clientX, touch.clientY) : e.target);
+  return (target && target.classList.contains('cell')) ? target : null;
+}
+function startSelect(e){
+  const el = cellFromEvent(e); if (!el) return;
+  state.selecting = true; state.path=[]; state.startCell=el; pushCell(el); e.preventDefault();
+}
+function moveSelect(e){
+  if (!state.selecting) return;
+  const el = cellFromEvent(e); if (!el) return;
+  pushCell(el);
+}
+function endSelect(){
+  if (!state.selecting) return;
+  state.selecting=false; checkSelection(); clearSelecting();
+}
+function pushCell(el){
+  const x=+el.dataset.x, y=+el.dataset.y;
+  const last=state.path[state.path.length-1];
+  if (last && last.x===x && last.y===y) return;
+
+  // Mantener línea: H, V o D (permitimos arrastrar al revés por UX)
+  if (state.path.length>=1){
+    const x0=state.path[0].x, y0=state.path[0].y;
+    const dx=Math.sign(x-x0), dy=Math.sign(y-y0);
+    const valid=(dx===1&&dy===0)||(dx===0&&dy===1)||(dx===1&&dy===1)||(dx===-1&&dy===0)||(dx===0&&dy===-1)||(dx===-1&&dy===-1);
+    if (!valid) return;
+    const onLine = (x-x0===y-y0) || (x===x0) || (y===y0);
+    if (!onLine) return;
+  }
+  state.path.push({x,y});
+  el.classList.add('selecting');
+}
+function clearSelecting(){
+  $grid.querySelectorAll('.cell.selecting').forEach(c=>c.classList.remove('selecting'));
+  state.path=[];
+}
+function checkSelection(){
+  if (state.path.length<2) return;
+  const letters = state.path.map(p=> state.grid[p.y][p.x]).join('');
+  const rev = letters.split('').reverse().join('');
+  const pick = toGridWord(letters);
+  const pickRev = toGridWord(rev);
+
+  let hitIdx=-1, placement=null;
+  for (const p of state.placements){
+    if (state.found.has(p.idx)) continue;
+    if (pick===p.word || pickRev===p.word){ hitIdx=p.idx; placement=p; break; }
+  }
+  if (hitIdx>=0){
+    for (let i=0;i<placement.word.length;i++){
+      const x=placement.x+placement.dx*i, y=placement.y+placement.dy*i;
+      const el=$grid.querySelector(`.cell[data-x="${x}"][data-y="${y}"]`);
+      if (el) el.classList.add('found');
+    }
+    state.found.add(hitIdx);
+    dibujarLista();
+    if (state.found.size===palabras.length){
+      $modalFin.classList.add('show');
+    }
+  }
+}
+
+/* ===== Auto-resize (ajuste fino: ancho + alto + posición del grid) ===== */
+function viewportH(){
+  return (window.visualViewport?.height) || window.innerHeight || document.documentElement.clientHeight;
+}
+function ajustarTamanoCeldas() {
+  // Gap dinámico: más chico en móviles angostos
+  const vw = Math.max(document.documentElement.clientWidth, window.innerWidth || 0);
+  let gapPx = 6;
+  if (vw < 420) gapPx = 4;
+  if (vw < 360) gapPx = 2;
+  document.documentElement.style.setProperty('--grid-gap', gapPx + 'px');
+
+  const gap = gapPx;
+  const ancho = $grid.clientWidth;                      // ancho útil del grid
+  const vh = viewportH();                               // alto visible real
+  const top = $grid.getBoundingClientRect().top;        // distancia del grid al borde superior
+
+  // Tamaño por ancho
+  const sizeW = Math.floor((ancho - (N - 1) * gap) / N);
+
+  // Tamaño por alto (más conservador para que entre sin zoom)
+  const margenInferior = 28;
+  const factorAltura = vw < 520 ? 0.46 : 0.53;          // << ajuste fino
+  const altoDisponible = Math.max(120, Math.floor((vh - top - margenInferior) * factorAltura));
+  const sizeH = Math.floor((altoDisponible - (N - 1) * gap) / N);
+
+  // Elegimos el menor para que no se corte
+  const size = Math.min(sizeW, sizeH);
+
+  // Límites y derivados
+  const sizeClamped = Math.max(22, Math.min(size, 56));
+  const font = Math.max(12, Math.min(Math.round(sizeClamped * 0.44), 22));
+  const border = sizeClamped <= 26 ? 1 : (sizeClamped <= 34 ? 1.5 : 2);
+
+  document.documentElement.style.setProperty('--cell-size', sizeClamped + 'px');
+  document.documentElement.style.setProperty('--cell-font', font + 'px');
+  document.documentElement.style.setProperty('--cell-border', border + 'px');
+}
+
+// Recalcular varias veces al cargar por si el navegador mueve barras tras el primer paint
+function rafBurst(times=5, fn){
+  let i=0; const tick=()=>{ fn(); if(++i<times) requestAnimationFrame(tick); };
+  requestAnimationFrame(tick);
+}
+
+let ro;
+function iniciarObservadorResize() {
+  if (ro) ro.disconnect();
+  ro = new ResizeObserver(() => ajustarTamanoCeldas());
+  ro.observe($grid);
+  window.addEventListener('resize', ajustarTamanoCeldas);
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', ajustarTamanoCeldas);
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(()=> rafBurst(4, ajustarTamanoCeldas));
+  }
+  rafBurst(4, ajustarTamanoCeldas);
+}
+
+/* ===== Eventos ===== */
+$grid.addEventListener('pointerdown', startSelect);
+$grid.addEventListener('pointermove', moveSelect);
+window.addEventListener('pointerup', endSelect);
+$grid.addEventListener('touchstart', startSelect, {passive:false});
+$grid.addEventListener('touchmove', moveSelect, {passive:false});
+window.addEventListener('touchend', endSelect);
+
+$btnReiniciar.addEventListener('click', init);
+$btnCerrarModal.addEventListener('click', ()=> $modalFin.classList.remove('show'));
+
+/* ===== Init ===== */
+function init(){
+  const {grid, placements} = generarSopa();
+  state.grid = grid; state.placements = placements;
+  state.found = new Set();
+  renderGrid();
+  dibujarLista();
+  $modalFin.classList.remove('show');
+  iniciarObservadorResize();   // asegura que siempre entre sin zoom
+}
+init();
+</script>
+</body>
+</html>
